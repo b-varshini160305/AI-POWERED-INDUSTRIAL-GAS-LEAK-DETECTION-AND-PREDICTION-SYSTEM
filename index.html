@@ -1,0 +1,2943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Gas Leak Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+
+<style>
+body {
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#0f172a;
+    color:#e5e7eb;
+    text-align:center;
+}
+header {
+    background:#020617;
+    padding:15px;
+    font-size:22px;
+    font-weight:bold;
+}
+.controls { margin:15px; }
+button {
+    padding:8px 15px; margin:5px;
+    border:none; border-radius:5px;
+    background:#1e293b; color:white; cursor:pointer;
+}
+button:hover { background:#334155; }
+.dashboard {
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+    gap:15px; padding:10px; max-width:1000px; margin:auto;
+}
+.card {
+    background:#020617; padding:15px; border-radius:10px;
+    box-shadow:0 4px 10px rgba(0,0,0,0.5);
+}
+.card-title { color:#94a3b8; font-size:13px; text-transform:uppercase; }
+.card-value { font-size:24px; font-weight:bold; margin-top:5px; }
+.status-safe { color:#22c55e; }
+.status-warn { color:#eab308; }
+.status-leak { color:#ef4444; }
+.fan-safe i { color:#22c55e; animation:none; }
+.fan-warn i { color:#eab308; animation: spin 1s linear infinite; }
+.fan-leak i { color:#ef4444; animation: spin 0.5s linear infinite; }
+@keyframes spin {0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}
+.chart-box { background:#020617; padding:15px; border-radius:10px; max-width:1000px; margin:20px auto; }
+#aiExplain { color:#fcd34d; margin:5px; }
+#timeToLeak { color:#f87171; margin:5px; }
+.flash-warning { animation: flashWarn 1s infinite; }
+.flash-leak { animation: flashLeak 0.6s infinite; }
+@keyframes flashWarn {0%{background:#1e293b;}50%{background:#713f12;}100%{background:#1e293b;}}
+@keyframes flashLeak {0%{background:#1e293b;}50%{background:#7f1d1d;}100%{background:#1e293b;}}
+</style>
+</head>
+<body>
+
+<header>AI Gas Leak Control Room</header>
+
+<div class="controls">
+    <button id="startBtn">▶ Start</button>
+    <button id="stopBtn">⏹ Stop</button>
+    <button id="downloadCSV">📄 Download CSV</button>
+    <button id="downloadPDF">📝 Download PDF</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value" id="gas">-- ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Status</div>
+        <div class="card-value status-safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value" id="leakCount">0</div>
+    </div>
+    <div class="card">
+        <div class="card-title">AI Risk</div>
+        <div class="card-value" id="risk">0%</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Exhaust Fan</div>
+        <div class="card-value fan-safe" id="fanStatus"><i class="fas fa-fan" id="fanIcon"></i> OFF</div>
+    </div>
+</div>
+
+<div id="aiExplain">AI Explanation: --</div>
+<div id="timeToLeak">Time-to-Leak: -- min</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarm" src="https://www.soundjay.com/button/beep-07.wav"></audio>
+<audio id="fanSound" src="https://www.soundjay.com/mechanical/fan-blow-1.mp3"></audio>
+
+<script>
+let labels=[], gasData=[], predData=[], reportData=[];
+let interval = null, leakCount=0, alerted=false;
+const SAFE_LIMIT=400;
+
+const ctx=document.getElementById("gasChart").getContext("2d");
+const chart=new Chart(ctx,{
+    type:"line",
+    data:{
+        labels,
+        datasets:[
+            {label:"Gas Level", data:gasData, borderColor:"#22c55e", borderWidth:2, tension:0.3},
+            {label:"Predicted", data:predData, borderColor:"#38bdf8", borderWidth:2, borderDash:[5,5], pointRadius:0}
+        ]
+    },
+    options:{responsive:true, scales:{y:{beginAtZero:true,max:1000}}}
+});
+
+function fetchData(){
+    // Replace with real API later
+    const gas=Math.floor(Math.random()*500);
+    document.getElementById("gas").innerText=gas+" ppm";
+    gasData.push(gas); if(gasData.length>30) gasData.shift();
+
+    // Predictive warning
+    let avgRise=0,futureGas=gas;
+    if(gasData.length>=5){
+        let totalDiff=0;
+        for(let i=gasData.length-5;i<gasData.length-1;i++) totalDiff+=gasData[i+1]-gasData[i];
+        avgRise=totalDiff/4;
+        if(avgRise>0) futureGas+=avgRise*10;
+    }
+
+    let risk=Math.min(Math.max(Math.round((futureGas/SAFE_LIMIT)*100),0),100);
+    document.getElementById("risk").innerText=risk+"%";
+    document.getElementById("aiExplain").innerText=avgRise>0?`Gas rising ${avgRise.toFixed(1)} ppm/interval → predictive risk ${risk}%`:"Stable";
+    document.getElementById("timeToLeak").innerText=avgRise>0?`Time-to-Leak: ${Math.round((SAFE_LIMIT-gas)/avgRise)} min`:"--";
+
+    const statusEl=document.getElementById("status");
+    const fanEl=document.getElementById("fanStatus");
+    const fanSound=document.getElementById("fanSound");
+    const alarm=document.getElementById("alarm");
+    document.body.classList.remove("flash-warning","flash-leak");
+
+    // PRE-WARNING
+    if(futureGas>=SAFE_LIMIT && gas<SAFE_LIMIT){
+        statusEl.innerText="PRE-WARNING"; statusEl.className="card-value status-warn";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> ON (Precaution)'; fanEl.className="card-value fan-warn";
+        document.body.classList.add("flash-warning"); fanSound.play(); alerted=false;
+    }
+    // LEAK
+    else if(gas>=SAFE_LIMIT){
+        statusEl.innerText="LEAK"; statusEl.className="card-value status-leak";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> ON (MAX)'; fanEl.className="card-value fan-leak";
+        document.body.classList.add("flash-leak"); fanSound.play();
+        if(!alerted){alarm.play(); leakCount++; document.getElementById("leakCount").innerText=leakCount; alerted=true;}
+    }
+    else{
+        statusEl.innerText="SAFE"; statusEl.className="card-value status-safe";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> OFF'; fanEl.className="card-value fan-safe";
+        fanSound.pause(); fanSound.currentTime=0; alerted=false;
+    }
+
+    labels.push(new Date().toLocaleTimeString()); if(labels.length>30) labels.shift();
+    predData.push(Math.round((risk/100)*SAFE_LIMIT)); if(predData.length>30) predData.shift();
+    chart.update();
+
+    // store report
+    reportData.push({time: new Date().toLocaleTimeString(), gas, status:statusEl.innerText, risk});
+}
+
+// Start / Stop buttons fixed
+document.getElementById("startBtn").onclick=()=>{
+    if(interval) clearInterval(interval);
+    interval=setInterval(fetchData,8000); // 8s interval
+    fetchData(); // run immediately
+};
+
+document.getElementById("stopBtn").onclick=()=>{
+    if(interval){ clearInterval(interval); interval=null; }
+};
+
+// CSV Download
+document.getElementById("downloadCSV").onclick=()=>{
+    let csv="Time,Gas,Status,Risk\n";
+    reportData.forEach(r=>{csv+=`${r.time},${r.gas},${r.status},${r.risk}\n`;});
+    let blob=new Blob([csv],{type:"text/csv"});
+    let a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="gas_report.csv"; a.click();
+};
+
+// PDF Download
+document.getElementById("downloadPDF").onclick=()=>{
+    const { jsPDF } = window.jspdf;
+    let doc=new jsPDF();
+    doc.setFontSize(12); doc.text("Gas Leak Report",105,10,{align:"center"});
+    let y=20; doc.text("Time  Gas  Status  Risk",10,y);
+    reportData.forEach(r=>{
+        y+=7; doc.text(`${r.time}  ${r.gas}  ${r.status}  ${r.risk}%`,10,y);
+    });
+    doc.save("gas_report.pdf");
+};
+</script>
+
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!--
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Gas Leak Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+<style>
+body {
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#0f172a;
+    color:#e5e7eb;
+    text-align:center;
+}
+header {
+    background:#020617;
+    padding:15px;
+    font-size:22px;
+    font-weight:bold;
+}
+.controls { margin:15px; }
+button {
+    padding:8px 15px; margin:5px;
+    border:none; border-radius:5px;
+    background:#1e293b; color:white; cursor:pointer;
+}
+button:hover { background:#334155; }
+.dashboard {
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+    gap:15px; padding:10px; max-width:1000px; margin:auto;
+}
+.card {
+    background:#020617; padding:15px; border-radius:10px;
+    box-shadow:0 4px 10px rgba(0,0,0,0.5);
+}
+.card-title { color:#94a3b8; font-size:13px; text-transform:uppercase; }
+.card-value { font-size:24px; font-weight:bold; margin-top:5px; }
+.status-safe { color:#22c55e; }
+.status-warn { color:#eab308; }
+.status-leak { color:#ef4444; }
+.fan-safe i { color:#22c55e; animation:none; }
+.fan-warn i { color:#eab308; animation: spin 1s linear infinite; }
+.fan-leak i { color:#ef4444; animation: spin 0.5s linear infinite; }
+@keyframes spin {0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}
+.chart-box { background:#020617; padding:15px; border-radius:10px; max-width:1000px; margin:20px auto; }
+#aiExplain { color:#fcd34d; margin:5px; }
+#timeToLeak { color:#f87171; margin:5px; }
+.flash-warning { animation: flashWarn 1s infinite; }
+.flash-leak { animation: flashLeak 0.6s infinite; }
+@keyframes flashWarn {0%{background:#1e293b;}50%{background:#713f12;}100%{background:#1e293b;}}
+@keyframes flashLeak {0%{background:#1e293b;}50%{background:#7f1d1d;}100%{background:#1e293b;}}
+</style>
+</head>
+<body>
+
+<header>AI Gas Leak Control Room</header>
+
+<div class="controls">
+    <button id="startBtn">▶ Start</button>
+    <button id="stopBtn">⏹ Stop</button>
+    <button id="downloadCSV">📄 Download CSV</button>
+    <button id="downloadPDF">📝 Download PDF</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value" id="gas">-- ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Status</div>
+        <div class="card-value status-safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value" id="leakCount">0</div>
+    </div>
+    <div class="card">
+        <div class="card-title">AI Risk</div>
+        <div class="card-value" id="risk">0%</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Exhaust Fan</div>
+        <div class="card-value fan-safe" id="fanStatus"><i class="fas fa-fan" id="fanIcon"></i> OFF</div>
+    </div>
+</div>
+
+<div id="aiExplain">AI Explanation: --</div>
+<div id="timeToLeak">Time-to-Leak: -- min</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarm" src="https://www.soundjay.com/button/beep-07.wav"></audio>
+<audio id="fanSound" src="https://www.soundjay.com/mechanical/fan-blow-1.mp3"></audio>
+
+<script>
+let labels=[], gasData=[], predData=[], reportData=[];
+let interval, leakCount=0, alerted=false;
+const SAFE_LIMIT=400;
+
+const ctx=document.getElementById("gasChart").getContext("2d");
+const chart=new Chart(ctx,{
+    type:"line",
+    data:{
+        labels,
+        datasets:[
+            {label:"Gas Level", data:gasData, borderColor:"#22c55e", borderWidth:2, tension:0.3},
+            {label:"Predicted", data:predData, borderColor:"#38bdf8", borderWidth:2, borderDash:[5,5], pointRadius:0}
+        ]
+    },
+    options:{responsive:true, scales:{y:{beginAtZero:true,max:1000}}}
+});
+
+function fetchData(){
+    // Replace this with your real API later
+    const gas=Math.floor(Math.random()*500);
+    document.getElementById("gas").innerText=gas+" ppm";
+    gasData.push(gas); if(gasData.length>30) gasData.shift();
+
+    // Predictive warning
+    let avgRise=0,futureGas=gas;
+    if(gasData.length>=5){
+        let totalDiff=0;
+        for(let i=gasData.length-5;i<gasData.length-1;i++) totalDiff+=gasData[i+1]-gasData[i];
+        avgRise=totalDiff/4;
+        if(avgRise>0) futureGas+=avgRise*10;
+    }
+
+    let risk=Math.min(Math.max(Math.round((futureGas/SAFE_LIMIT)*100),0),100);
+    document.getElementById("risk").innerText=risk+"%";
+    document.getElementById("aiExplain").innerText=avgRise>0?`Gas rising ${avgRise.toFixed(1)} ppm/interval → predictive risk ${risk}%`:"Stable";
+    document.getElementById("timeToLeak").innerText=avgRise>0?`Time-to-Leak: ${Math.round((SAFE_LIMIT-gas)/avgRise)} min`:"--";
+
+    const statusEl=document.getElementById("status");
+    const fanEl=document.getElementById("fanStatus");
+    const fanSound=document.getElementById("fanSound");
+    const alarm=document.getElementById("alarm");
+    document.body.classList.remove("flash-warning","flash-leak");
+
+    // PRE-WARNING
+    if(futureGas>=SAFE_LIMIT && gas<SAFE_LIMIT){
+        statusEl.innerText="PRE-WARNING"; statusEl.className="card-value status-warn";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> ON (Precaution)'; fanEl.className="card-value fan-warn";
+        document.body.classList.add("flash-warning"); fanSound.play(); alerted=false;
+    }
+    // LEAK
+    else if(gas>=SAFE_LIMIT){
+        statusEl.innerText="LEAK"; statusEl.className="card-value status-leak";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> ON (MAX)'; fanEl.className="card-value fan-leak";
+        document.body.classList.add("flash-leak"); fanSound.play();
+        if(!alerted){alarm.play(); leakCount++; document.getElementById("leakCount").innerText=leakCount; alerted=true;}
+    }
+    else{
+        statusEl.innerText="SAFE"; statusEl.className="card-value status-safe";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> OFF'; fanEl.className="card-value fan-safe";
+        fanSound.pause(); fanSound.currentTime=0; alerted=false;
+    }
+
+    labels.push(new Date().toLocaleTimeString()); if(labels.length>30) labels.shift();
+    predData.push(Math.round((risk/100)*SAFE_LIMIT)); if(predData.length>30) predData.shift();
+    chart.update();
+
+    // store report
+    reportData.push({time: new Date().toLocaleTimeString(), gas, status:statusEl.innerText, risk});
+}
+
+// Start / Stop buttons with 15-second interval
+document.getElementById("startBtn").onclick=()=>{ fetchData(); interval=setInterval(fetchData,15000); };
+document.getElementById("stopBtn").onclick=()=>{ clearInterval(interval); };
+
+// CSV Download
+document.getElementById("downloadCSV").onclick=()=>{
+    let csv="Time,Gas,Status,Risk\n";
+    reportData.forEach(r=>{csv+=`${r.time},${r.gas},${r.status},${r.risk}\n`;});
+    let blob=new Blob([csv],{type:"text/csv"});
+    let a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="gas_report.csv"; a.click();
+};
+
+// PDF Download
+document.getElementById("downloadPDF").onclick=()=>{
+    const { jsPDF } = window.jspdf;
+    let doc=new jsPDF();
+    doc.setFontSize(12); doc.text("Gas Leak Report",105,10,{align:"center"});
+    let y=20; doc.text("Time  Gas  Status  Risk",10,y);
+    reportData.forEach(r=>{
+        y+=7; doc.text(`${r.time}  ${r.gas}  ${r.status}  ${r.risk}%`,10,y);
+    });
+    doc.save("gas_report.pdf");
+};
+</script>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!--
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Gas Leak Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+<style>
+body {
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#0f172a;
+    color:#e5e7eb;
+    text-align:center;
+}
+header {
+    background:#020617;
+    padding:15px;
+    font-size:22px;
+    font-weight:bold;
+}
+.controls {
+    margin:15px;
+}
+button {
+    padding:8px 15px;
+    margin:5px;
+    border:none;
+    border-radius:5px;
+    background:#1e293b;
+    color:white;
+    cursor:pointer;
+}
+button:hover { background:#334155; }
+.dashboard {
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+    gap:15px;
+    padding:10px;
+    max-width:1000px;
+    margin:auto;
+}
+.card {
+    background:#020617;
+    padding:15px;
+    border-radius:10px;
+    box-shadow:0 4px 10px rgba(0,0,0,0.5);
+}
+.card-title { color:#94a3b8; font-size:13px; text-transform:uppercase; }
+.card-value { font-size:24px; font-weight:bold; margin-top:5px; }
+.status-safe { color:#22c55e; }
+.status-warn { color:#eab308; }
+.status-leak { color:#ef4444; }
+.fan-safe i { color:#22c55e; animation:none; }
+.fan-warn i { color:#eab308; animation: spin 1s linear infinite; }
+.fan-leak i { color:#ef4444; animation: spin 0.5s linear infinite; }
+@keyframes spin {0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}
+.chart-box { background:#020617; padding:15px; border-radius:10px; max-width:1000px; margin:20px auto; }
+#aiExplain { color:#fcd34d; margin:5px; }
+#timeToLeak { color:#f87171; margin:5px; }
+.flash-warning { animation: flashWarn 1s infinite; }
+.flash-leak { animation: flashLeak 0.6s infinite; }
+@keyframes flashWarn {0%{background:#1e293b;}50%{background:#713f12;}100%{background:#1e293b;}}
+@keyframes flashLeak {0%{background:#1e293b;}50%{background:#7f1d1d;}100%{background:#1e293b;}}
+</style>
+</head>
+<body>
+
+<header>AI Gas Leak Control Room</header>
+
+<div class="controls">
+    <button id="startBtn">▶ Start</button>
+    <button id="stopBtn">⏹ Stop</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value" id="gas">-- ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Status</div>
+        <div class="card-value status-safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value" id="leakCount">0</div>
+    </div>
+    <div class="card">
+        <div class="card-title">AI Risk</div>
+        <div class="card-value" id="risk">0%</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Exhaust Fan</div>
+        <div class="card-value fan-safe" id="fanStatus"><i class="fas fa-fan" id="fanIcon"></i> OFF</div>
+    </div>
+</div>
+
+<div id="aiExplain">AI Explanation: --</div>
+<div id="timeToLeak">Time-to-Leak: -- min</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarm" src="https://www.soundjay.com/button/beep-07.wav"></audio>
+<audio id="fanSound" src="https://www.soundjay.com/mechanical/fan-blow-1.mp3"></audio>
+
+<script>
+let labels=[], gasData=[], predData=[], reportData=[];
+let interval, leakCount=0, alerted=false;
+const SAFE_LIMIT=400;
+const WARNING_LIMIT=300;
+
+const ctx = document.getElementById("gasChart").getContext("2d");
+const chart = new Chart(ctx,{
+    type:"line",
+    data:{
+        labels,
+        datasets:[
+            {label:"Gas Level", data:gasData, borderColor:"#22c55e", borderWidth:2, tension:0.3},
+            {label:"Predicted", data:predData, borderColor:"#38bdf8", borderWidth:2, borderDash:[5,5], pointRadius:0}
+        ]
+    },
+    options:{responsive:true, scales:{y:{beginAtZero:true,max:1000}}}
+});
+
+function predictRiskAndTime() {
+    if(gasData.length<5) return {risk:0,timeToLeak:"--",explain:"--"};
+    let totalDiff=0;
+    for(let i=gasData.length-5;i<gasData.length-1;i++) totalDiff+=gasData[i+1]-gasData[i];
+    let avgRise=totalDiff/4;
+    let currentGas=gasData[gasData.length-1];
+    let futureGas=currentGas+avgRise*10;
+    let risk=Math.min(Math.max(Math.round((futureGas/SAFE_LIMIT)*100),0),100);
+    let timeToLeak= avgRise>0 ? Math.round((SAFE_LIMIT-currentGas)/avgRise) : "--";
+    let explain= avgRise>0 ? `Rising ${avgRise.toFixed(1)} ppm/interval → risk ${risk}%` : "Stable";
+    return {risk,timeToLeak,explain};
+}
+
+function fetchData() {
+    // Demo: Random gas value (replace with your /data API)
+    const gas = Math.floor(Math.random()*500);
+    document.getElementById("gas").innerText=gas+" ppm";
+
+    gasData.push(gas); if(gasData.length>30) gasData.shift();
+    let {risk,timeToLeak,explain}=predictRiskAndTime();
+    document.getElementById("risk").innerText=risk+"%";
+    document.getElementById("aiExplain").innerText="AI Explanation: "+explain;
+    document.getElementById("timeToLeak").innerText="Time-to-Leak: "+timeToLeak+" min";
+
+    const statusEl=document.getElementById("status");
+    const fanEl=document.getElementById("fanStatus");
+    const fanSound=document.getElementById("fanSound");
+    const alarm=document.getElementById("alarm");
+
+    document.body.classList.remove("flash-warning","flash-leak");
+
+    if(risk>=70 || gas>=SAFE_LIMIT){
+        statusEl.innerText="LEAK"; statusEl.className="card-value status-leak";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> ON (MAX)'; fanEl.className="card-value fan-leak";
+        document.body.classList.add("flash-leak"); fanSound.play();
+        if(!alerted){alarm.play(); leakCount++; document.getElementById("leakCount").innerText=leakCount; alerted=true;}
+    }
+    else if(risk>=40 || gas>=WARNING_LIMIT){
+        statusEl.innerText="WARNING"; statusEl.className="card-value status-warn";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> ON (Precaution)'; fanEl.className="card-value fan-warn";
+        document.body.classList.add("flash-warning"); fanSound.play(); alerted=false;
+    }
+    else{
+        statusEl.innerText="SAFE"; statusEl.className="card-value status-safe";
+        fanEl.innerHTML='<i class="fas fa-fan"></i> OFF'; fanEl.className="card-value fan-safe";
+        fanSound.pause(); fanSound.currentTime=0; alerted=false;
+    }
+
+    labels.push(new Date().toLocaleTimeString()); if(labels.length>30) labels.shift();
+    predData.push(Math.round((risk/100)*SAFE_LIMIT)); if(predData.length>30) predData.shift();
+    chart.update();
+}
+
+document.getElementById("startBtn").onclick=()=>{fetchData(); interval=setInterval(fetchData,2000);};
+document.getElementById("stopBtn").onclick=()=>clearInterval(interval);
+
+</script>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!--
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Gas Leak Control Room</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+body{
+    margin:0;
+    font-family:"Segoe UI",Arial,sans-serif;
+    background:#0f172a;
+    color:#e5e7eb;
+}
+header{
+    background:#020617;
+    padding:15px;
+    text-align:center;
+    font-size:22px;
+    font-weight:600;
+}
+.controls{
+    text-align:center;
+    margin:15px;
+}
+button{
+    background:#020617;
+    color:#e5e7eb;
+    border:1px solid #1e293b;
+    padding:8px 14px;
+    margin:5px;
+    border-radius:6px;
+    cursor:pointer;
+}
+button:hover{background:#1e293b;}
+.dashboard{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:15px;
+    padding:20px;
+    max-width:1100px;
+    margin:auto;
+}
+.card{
+    background:#020617;
+    border-radius:10px;
+    padding:18px;
+    box-shadow:0 4px 10px rgba(0,0,0,.6);
+}
+.card-title{
+    font-size:13px;
+    color:#94a3b8;
+    text-transform:uppercase;
+}
+.card-value{
+    font-size:26px;
+    font-weight:600;
+}
+.status-safe{color:#22c55e;}
+.status-warn{color:#eab308;}
+.status-leak{color:#ef4444;}
+
+@keyframes flashWarn{
+    0%{background:#1e293b;}
+    50%{background:#713f12;}
+    100%{background:#1e293b;}
+}
+@keyframes flashLeak{
+    0%{background:#1e293b;}
+    50%{background:#7f1d1d;}
+    100%{background:#1e293b;}
+}
+.flash-warning{animation:flashWarn 1s infinite;}
+.flash-leak{animation:flashLeak .6s infinite;}
+
+.chart-box{
+    background:#020617;
+    margin:20px auto;
+    padding:20px;
+    border-radius:12px;
+    max-width:1100px;
+}
+#aiExplain{
+    text-align:center;
+    color:#fcd34d;
+    font-weight:600;
+    margin:10px;
+    font-size:15px;
+}
+#timeToLeak{
+    text-align:center;
+    color:#f87171;
+    font-weight:600;
+    margin:5px;
+    font-size:15px;
+}
+footer{
+    text-align:center;
+    font-size:13px;
+    color:#64748b;
+    margin:15px;
+}
+</style>
+</head>
+
+<body>
+
+<header>AI Gas Leak Control Room – Industrial Dashboard</header>
+
+<div class="controls">
+    <button id="startBtn">▶ Start</button>
+    <button id="stopBtn">⏹ Stop</button>
+    <button onclick="downloadCSV()">⬇ CSV</button>
+    <button onclick="downloadPDF()">⬇ PDF</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value"><span id="gas">--</span> ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Status</div>
+        <div class="card-value status-safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value"><span id="leakCount">0</span></div>
+    </div>
+    <div class="card">
+        <div class="card-title">AI Risk (Next 10 min)</div>
+        <div class="card-value"><span id="risk">0</span>%</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Exhaust Fan</div>
+        <div class="card-value status-safe" id="fanStatus">OFF</div>
+    </div>
+</div>
+
+<div id="aiExplain">AI Explanation: --</div>
+<div id="timeToLeak">Time-to-Leak: -- min</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarm">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<audio id="fanSound">
+    <source src="https://www.soundjay.com/mechanical/fan-blow-1.mp3">
+</audio>
+
+<script>
+let labels=[], gasData=[], predData=[], reportData=[];
+let interval, leakCount=0, alerted=false;
+
+const SAFE_LIMIT=400;
+const WARNING_LIMIT=300;
+
+/* ===== CHART ===== */
+const chart=new Chart(document.getElementById("gasChart"),{
+    type:"line",
+    data:{
+        labels,
+        datasets:[
+            {label:"Current Gas", data:gasData, borderWidth:2, borderColor:"#22c55e", tension:.3},
+            {label:"AI Predicted Trend", data:predData, borderDash:[5,5], borderColor:"#38bdf8", pointRadius:0},
+            {label:"Safe Limit", data:Array(30).fill(SAFE_LIMIT), borderDash:[4,4], borderColor:"#94a3b8", pointRadius:0}
+        ]
+    },
+    options:{responsive:true, scales:{y:{beginAtZero:true,max:1000}}}
+});
+
+/* ===== AI EARLY WARNING + TIME-TO-LEAK ===== */
+function predictRiskAndTime(){
+    if(gasData.length<5) return {risk:0,timeToLeak:"--",explain:"--"};
+
+    let totalDiff=0;
+    for(let i=gasData.length-5;i<gasData.length-1;i++){
+        totalDiff+=gasData[i+1]-gasData[i];
+    }
+    let avgRise=totalDiff/4;
+    let currentGas=gasData[gasData.length-1];
+    let futureGas=currentGas+avgRise*10;
+    let risk=Math.round((futureGas/SAFE_LIMIT)*100);
+    risk=Math.min(Math.max(risk,0),100);
+
+    let timeToLeak= avgRise>0 ? Math.round((SAFE_LIMIT-currentGas)/avgRise) : "--";
+    let explain= avgRise>0 ? `Gas rising at ${avgRise.toFixed(1)} ppm/interval → predictive risk ${risk}%` : "Stable";
+
+    return {risk,timeToLeak,explain};
+}
+
+/* ===== FETCH DATA ===== */
+function fetchData(){
+    fetch("/data")
+    .then(res=>res.json())
+    .then(data=>{
+        const gas=data.gas_value;
+        document.getElementById("gas").innerText=gas;
+
+        gasData.push(gas); if(gasData.length>30) gasData.shift();
+        let {risk,timeToLeak,explain}=predictRiskAndTime();
+
+        document.getElementById("risk").innerText=risk;
+        document.getElementById("aiExplain").innerText="AI Explanation: "+explain;
+        document.getElementById("timeToLeak").innerText="Time-to-Leak: "+timeToLeak+" min";
+
+        const statusEl=document.getElementById("status");
+        document.body.classList.remove("flash-warning","flash-leak");
+
+        const fanEl=document.getElementById("fanStatus");
+        const fanSound=document.getElementById("fanSound");
+
+        // SENSOR FAULT
+        if(gasData.length>=5){
+            let recent=[...gasData].slice(-5);
+            let diff=Math.max(...recent)-Math.min(...recent);
+            if(diff===0){statusEl.innerText="SENSOR FAULT"; statusEl.className="card-value status-warn"; alert("Sensor may be stuck!");}
+        }
+
+        // FAN + STATUS LOGIC
+        if(risk>=70 || gas>=SAFE_LIMIT){
+            statusEl.innerText="LEAK"; statusEl.className="card-value status-leak";
+            chart.data.datasets[0].borderColor="#ef4444";
+            document.body.classList.add("flash-leak");
+            fanEl.innerText="ON (MAX)"; fanEl.className="card-value status-leak";
+            fanSound.play();
+
+            if(!alerted){document.getElementById("alarm").play(); leakCount++; document.getElementById("leakCount").innerText=leakCount; alerted=true;}
+        }
+        else if(risk>=40 || gas>=WARNING_LIMIT){
+            statusEl.innerText="WARNING"; statusEl.className="card-value status-warn";
+            chart.data.datasets[0].borderColor="#eab308";
+            document.body.classList.add("flash-warning");
+            fanEl.innerText="ON (Precaution)"; fanEl.className="card-value status-warn";
+            fanSound.play(); alerted=false;
+        }
+        else{
+            statusEl.innerText="SAFE"; statusEl.className="card-value status-safe";
+            chart.data.datasets[0].borderColor="#22c55e";
+            fanEl.innerText="OFF"; fanEl.className="card-value status-safe";
+            fanSound.pause(); fanSound.currentTime=0; alerted=false;
+        }
+
+        const time=new Date().toLocaleTimeString();
+        labels.push(time); if(labels.length>30) labels.shift();
+        predData.push(Math.round((risk/100)*SAFE_LIMIT)); if(predData.length>30) predData.shift();
+
+        reportData.push({time,gas,risk,status:statusEl.innerText,fan:fanEl.innerText});
+        chart.update();
+    });
+}
+
+/* ===== REPORTS ===== */
+function downloadCSV(){
+    let csv="Time,Gas,Risk,Status,Fan\n";
+    reportData.forEach(r=>{csv+=`${r.time},${r.gas},${r.risk},${r.status},${r.fan}\n`;});
+    const blob=new Blob([csv],{type:"text/csv"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="gas_report.csv"; a.click();
+}
+function downloadPDF(){
+    const {jsPDF}=window.jspdf; const doc=new jsPDF();
+    doc.text("AI Gas Leak Monitoring Report",20,20);
+    let y=30;
+    reportData.slice(-15).forEach(r=>{
+        doc.text(`${r.time} | Gas:${r.gas} | Risk:${r.risk}% | ${r.status} | Fan:${r.fan}`,20,y); y+=8;
+    });
+    doc.save("gas_report.pdf");
+}
+
+/* ===== CONTROLS ===== */
+document.getElementById("startBtn").onclick=()=>{fetchData(); interval=setInterval(fetchData,2000);};
+document.getElementById("stopBtn").onclick=()=>clearInterval(interval);
+
+</script>
+
+<footer>© 2026 AI + IoT Industrial Safety System</footer>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+
+
+
+
+<!--
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Gas Leak Control Room</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+body{
+    margin:0;
+    font-family:"Segoe UI",Arial,sans-serif;
+    background:#0f172a;
+    color:#e5e7eb;
+}
+header{
+    background:#020617;
+    padding:15px;
+    text-align:center;
+    font-size:22px;
+    font-weight:600;
+}
+.controls{
+    text-align:center;
+    margin:15px;
+}
+button{
+    background:#020617;
+    color:#e5e7eb;
+    border:1px solid #1e293b;
+    padding:8px 14px;
+    margin:5px;
+    border-radius:6px;
+    cursor:pointer;
+}
+button:hover{background:#1e293b;}
+
+.dashboard{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:15px;
+    padding:20px;
+    max-width:1100px;
+    margin:auto;
+}
+.card{
+    background:#020617;
+    border-radius:10px;
+    padding:18px;
+    box-shadow:0 4px 10px rgba(0,0,0,.6);
+}
+.card-title{
+    font-size:13px;
+    color:#94a3b8;
+    text-transform:uppercase;
+}
+.card-value{
+    font-size:26px;
+    font-weight:600;
+}
+
+.status-safe{color:#22c55e;}
+.status-warn{color:#eab308;}
+.status-leak{color:#ef4444;}
+
+@keyframes flashWarn{
+    0%{background:#1e293b;}
+    50%{background:#713f12;}
+    100%{background:#1e293b;}
+}
+@keyframes flashLeak{
+    0%{background:#1e293b;}
+    50%{background:#7f1d1d;}
+    100%{background:#1e293b;}
+}
+.flash-warning{animation:flashWarn 1s infinite;}
+.flash-leak{animation:flashLeak .6s infinite;}
+
+.chart-box{
+    background:#020617;
+    margin:20px auto;
+    padding:20px;
+    border-radius:12px;
+    max-width:1100px;
+}
+
+footer{
+    text-align:center;
+    font-size:13px;
+    color:#64748b;
+    margin:15px;
+}
+</style>
+</head>
+
+<body>
+
+<header>AI-Based Gas Leak Monitoring – Control Room</header>
+
+<div class="controls">
+    <button id="startBtn">▶ Start</button>
+    <button id="stopBtn">⏹ Stop</button>
+    <button onclick="downloadCSV()">⬇ CSV</button>
+    <button onclick="downloadPDF()">⬇ PDF</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value"><span id="gas">--</span> ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Status</div>
+        <div class="card-value status-safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value"><span id="leakCount">0</span></div>
+    </div>
+    <div class="card">
+        <div class="card-title">AI Risk (Next 10 min)</div>
+        <div class="card-value"><span id="risk">0</span>%</div>
+    </div>
+</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarm">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<script>
+/* ===== VARIABLES ===== */
+let labels=[], gasData=[], predData=[], reportData=[];
+let interval, leakCount=0, alerted=false;
+
+const SAFE_LIMIT=400;
+const WARNING_LIMIT=300;
+
+/* ===== CHART ===== */
+const chart=new Chart(document.getElementById("gasChart"),{
+    type:"line",
+    data:{
+        labels,
+        datasets:[
+            {
+                label:"Current Gas",
+                data:gasData,
+                borderWidth:2,
+                borderColor:"#22c55e",
+                tension:.3
+            },
+            {
+                label:"AI Predicted Trend",
+                data:predData,
+                borderDash:[5,5],
+                borderColor:"#38bdf8",
+                pointRadius:0
+            },
+            {
+                label:"Safe Limit",
+                data:Array(30).fill(SAFE_LIMIT),
+                borderDash:[4,4],
+                borderColor:"#94a3b8",
+                pointRadius:0
+            }
+        ]
+    },
+    options:{
+        responsive:true,
+        scales:{y:{beginAtZero:true,max:1000}}
+    }
+});
+
+/* ===== REAL EARLY AI PREDICTION ===== */
+function predictRisk(){
+    if(gasData.length<5) return 0;
+
+    let totalDiff=0;
+    for(let i=gasData.length-5;i<gasData.length-1;i++){
+        totalDiff += (gasData[i+1]-gasData[i]);
+    }
+
+    let avgRise = totalDiff/4;           // rate of rise
+    let futureGas = gasData[gasData.length-1] + avgRise*10; // future prediction
+
+    let risk = Math.round((futureGas/SAFE_LIMIT)*100);
+    return Math.min(Math.max(risk,0),100);
+}
+
+/* ===== FETCH DATA ===== */
+function fetchData(){
+    fetch("/data")
+    .then(res=>res.json())
+    .then(data=>{
+        const gas=data.gas_value;
+        document.getElementById("gas").innerText=gas;
+
+        gasData.push(gas);
+        if(gasData.length>30) gasData.shift();
+
+        const risk=predictRisk();
+        document.getElementById("risk").innerText=risk;
+
+        const statusEl=document.getElementById("status");
+        document.body.classList.remove("flash-warning","flash-leak");
+
+        if(gas>=SAFE_LIMIT || risk>=70){
+            statusEl.innerText="LEAK";
+            statusEl.className="card-value status-leak";
+            chart.data.datasets[0].borderColor="#ef4444";
+            document.body.classList.add("flash-leak");
+
+            if(!alerted){
+                document.getElementById("alarm").play();
+                leakCount++;
+                document.getElementById("leakCount").innerText=leakCount;
+                alerted=true;
+            }
+        }
+        else if(gas>=WARNING_LIMIT || risk>=40){
+            statusEl.innerText="WARNING";
+            statusEl.className="card-value status-warn";
+            chart.data.datasets[0].borderColor="#eab308";
+            document.body.classList.add("flash-warning");
+            alerted=false;
+        }
+        else{
+            statusEl.innerText="SAFE";
+            statusEl.className="card-value status-safe";
+            chart.data.datasets[0].borderColor="#22c55e";
+            alerted=false;
+        }
+
+        const time=new Date().toLocaleTimeString();
+        labels.push(time);
+        if(labels.length>30) labels.shift();
+
+        predData.push(Math.round((risk/100)*SAFE_LIMIT));
+        if(predData.length>30) predData.shift();
+
+        reportData.push({time,gas,risk,status:statusEl.innerText});
+        chart.update();
+    });
+}
+
+/* ===== REPORTS ===== */
+function downloadCSV(){
+    let csv="Time,Gas,Risk,Status\n";
+    reportData.forEach(r=>{
+        csv+=`${r.time},${r.gas},${r.risk},${r.status}\n`;
+    });
+    const blob=new Blob([csv],{type:"text/csv"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="gas_report.csv";
+    a.click();
+}
+function downloadPDF(){
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF();
+    doc.text("AI Gas Leak Monitoring Report",20,20);
+    let y=30;
+    reportData.slice(-15).forEach(r=>{
+        doc.text(`${r.time} | Gas:${r.gas} | Risk:${r.risk}% | ${r.status}`,20,y);
+        y+=8;
+    });
+    doc.save("gas_report.pdf");
+}
+
+/* ===== CONTROLS ===== */
+document.getElementById("startBtn").onclick=()=>{
+    fetchData();
+    interval=setInterval(fetchData,2000);
+};
+document.getElementById("stopBtn").onclick=()=>clearInterval(interval);
+</script>
+
+<footer>© 2026 AI + IoT Industrial Safety System</footer>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+
+<!--
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Gas Leak Control Room</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #0f172a;
+    color: #e5e7eb;
+}
+
+/* ===== HEADER ===== */
+header {
+    background: #020617;
+    padding: 15px;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 600;
+}
+
+/* ===== CONTROLS ===== */
+.controls {
+    text-align: center;
+    margin: 15px;
+}
+button {
+    background: #020617;
+    color: #e5e7eb;
+    border: 1px solid #1e293b;
+    padding: 8px 14px;
+    margin: 5px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+button:hover {
+    background: #1e293b;
+}
+
+/* ===== DASHBOARD ===== */
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px,1fr));
+    gap: 15px;
+    padding: 20px;
+    max-width: 1100px;
+    margin: auto;
+}
+.card {
+    background: #020617;
+    border-radius: 10px;
+    padding: 18px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.6);
+}
+.card-title {
+    font-size: 13px;
+    color: #94a3b8;
+    text-transform: uppercase;
+}
+.card-value {
+    font-size: 26px;
+    font-weight: 600;
+}
+
+/* ===== STATUS COLORS ===== */
+.status-safe { color: #22c55e; }
+.status-warn { color: #eab308; }
+.status-leak { color: #ef4444; }
+
+/* ===== FLASHING ===== */
+@keyframes flashWarn {
+    0% { background:#1e293b; }
+    50% { background:#713f12; }
+    100% { background:#1e293b; }
+}
+@keyframes flashLeak {
+    0% { background:#1e293b; }
+    50% { background:#7f1d1d; }
+    100% { background:#1e293b; }
+}
+.flash-warning { animation: flashWarn 1s infinite; }
+.flash-leak { animation: flashLeak 0.6s infinite; }
+
+/* ===== CHART ===== */
+.chart-box {
+    background: #020617;
+    margin: 20px auto;
+    padding: 20px;
+    border-radius: 12px;
+    max-width: 1100px;
+}
+footer {
+    text-align: center;
+    font-size: 13px;
+    color: #64748b;
+    margin: 15px;
+}
+</style>
+</head>
+
+<body>
+
+<header>AI-Based Gas Leak Monitoring – Control Room</header>
+
+<div class="controls">
+    <button id="startBtn">▶ Start</button>
+    <button id="stopBtn">⏹ Stop</button>
+    <button onclick="downloadCSV()">⬇ CSV</button>
+    <button onclick="downloadPDF()">⬇ PDF</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value"><span id="gas">--</span> ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Status</div>
+        <div class="card-value status-safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value"><span id="leakCount">0</span></div>
+    </div>
+    <div class="card">
+        <div class="card-title">AI Risk (10 min)</div>
+        <div class="card-value"><span id="risk">0</span>%</div>
+    </div>
+</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarm">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<script>
+/* ===== VARIABLES ===== */
+let labels=[], gasData=[], predData=[], reportData=[];
+let interval, leakCount=0, alerted=false;
+
+const SAFE_LIMIT = 400;
+const WARNING_LIMIT = 300;
+
+/* ===== CHART ===== */
+const chart = new Chart(document.getElementById("gasChart"), {
+    type: 'line',
+    data: {
+        labels,
+        datasets: [
+            {
+                label: "Current Gas",
+                data: gasData,
+                borderWidth: 2,
+                borderColor: "#22c55e",
+                tension: 0.3
+            },
+            {
+                label: "AI Prediction",
+                data: predData,
+                borderDash: [5,5],
+                borderColor: "#38bdf8",
+                pointRadius: 0
+            },
+            {
+                label: "Safe Limit",
+                data: Array(30).fill(SAFE_LIMIT),
+                borderDash: [4,4],
+                borderColor: "#94a3b8",
+                pointRadius: 0
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        scales: { y: { beginAtZero: true, max: 1000 } }
+    }
+});
+
+/* ===== AI PREDICTION (TREND BASED) ===== */
+function predictRisk() {
+    if (gasData.length < 2) return 0;
+    let diff = gasData[gasData.length-1] - gasData[gasData.length-2];
+    let future = gasData[gasData.length-1] + diff * 5;
+    return Math.min(Math.max(Math.round((future/SAFE_LIMIT)*100),0),100);
+}
+
+/* ===== FETCH DATA ===== */
+function fetchData(){
+    fetch("/data")
+    .then(res=>res.json())
+    .then(data=>{
+        const gas = data.gas_value;
+        document.getElementById("gas").innerText = gas;
+
+        const risk = predictRisk();
+        document.getElementById("risk").innerText = risk;
+
+        const statusEl = document.getElementById("status");
+        document.body.classList.remove("flash-warning","flash-leak");
+
+        if(gas >= SAFE_LIMIT || risk >= 70){
+            statusEl.innerText="LEAK";
+            statusEl.className="card-value status-leak";
+            chart.data.datasets[0].borderColor="#ef4444";
+            document.body.classList.add("flash-leak");
+
+            if(!alerted){
+                document.getElementById("alarm").play();
+                leakCount++;
+                document.getElementById("leakCount").innerText=leakCount;
+                alerted=true;
+            }
+        }
+        else if(gas >= WARNING_LIMIT || risk >= 40){
+            statusEl.innerText="WARNING";
+            statusEl.className="card-value status-warn";
+            chart.data.datasets[0].borderColor="#eab308";
+            document.body.classList.add("flash-warning");
+            alerted=false;
+        }
+        else{
+            statusEl.innerText="SAFE";
+            statusEl.className="card-value status-safe";
+            chart.data.datasets[0].borderColor="#22c55e";
+            alerted=false;
+        }
+
+        const time=new Date().toLocaleTimeString();
+        if(labels.length>30){labels.shift();gasData.shift();predData.shift();}
+        labels.push(time);
+        gasData.push(gas);
+        predData.push(risk*4);
+
+        reportData.push({time,gas,risk,status:statusEl.innerText});
+        chart.update();
+    });
+}
+
+/* ===== REPORTS ===== */
+function downloadCSV(){
+    let csv="Time,Gas,Risk,Status\n";
+    reportData.forEach(r=>{
+        csv+=`${r.time},${r.gas},${r.risk},${r.status}\n`;
+    });
+    const blob=new Blob([csv],{type:"text/csv"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="gas_report.csv";
+    a.click();
+}
+function downloadPDF(){
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF();
+    doc.text("AI Gas Leak Report",20,20);
+    let y=30;
+    reportData.slice(-15).forEach(r=>{
+        doc.text(`${r.time} | Gas:${r.gas} | Risk:${r.risk}% | ${r.status}`,20,y);
+        y+=8;
+    });
+    doc.save("gas_report.pdf");
+}
+
+/* ===== CONTROLS ===== */
+document.getElementById("startBtn").onclick=()=>{
+    fetchData();
+    interval=setInterval(fetchData,2000);
+};
+document.getElementById("stopBtn").onclick=()=>clearInterval(interval);
+</script>
+
+<footer>© 2026 AI + IoT Industrial Safety System</footer>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+<!--
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Gas Leak Monitoring</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+        }
+
+        header {
+            background: #020617;
+            padding: 15px;
+            text-align: center;
+            font-size: 22px;
+            font-weight: bold;
+            border-bottom: 1px solid #1e293b;
+        }
+
+        .container {
+            padding: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background: #020617;
+            border: 1px solid #1e293b;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.4);
+        }
+
+        .card-title {
+            font-size: 14px;
+            color: #94a3b8;
+        }
+
+        .card-value {
+            font-size: 28px;
+            margin-top: 10px;
+            font-weight: bold;
+        }
+
+        .status-safe { color: #16a34a; }
+        .status-warning { color: #facc15; }
+        .status-leak { color: #dc2626; }
+
+        canvas {
+            background: #020617;
+            border-radius: 12px;
+            padding: 10px;
+        }
+
+        /* FLASHING ALERT */
+        .flash {
+            animation: flashBg 1s infinite;
+        }
+
+        @keyframes flashBg {
+            0% { background-color: #020617; }
+            50% { background-color: #450a0a; }
+            100% { background-color: #020617; }
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    🧠 AI-Based Gas Leak Detection – Control Room
+</header>
+
+<div class="container">
+
+    <div class="card">
+        <div class="card-title">Gas Level (ppm)</div>
+        <div id="gas" class="card-value">0</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Current Status</div>
+        <div id="status" class="card-value status-safe">SAFE</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">AI Leak Probability (Next 10 min)</div>
+        <div id="aiRisk" class="card-value status-safe">0%</div>
+    </div>
+
+</div>
+
+<div class="container">
+    <div class="card" style="grid-column: span 2;">
+        <canvas id="gasChart"></canvas>
+    </div>
+
+    <div class="card">
+        <canvas id="aiChart"></canvas>
+    </div>
+</div>
+
+<audio id="siren" src="https://www.soundjay.com/misc/sounds/emergency-alarm-01.mp3"></audio>
+
+<script>
+    const gasEl = document.getElementById("gas");
+    const statusEl = document.getElementById("status");
+    const aiRiskEl = document.getElementById("aiRisk");
+    const siren = document.getElementById("siren");
+
+    let labels = [];
+    let gasData = [];
+    let aiLabels = [];
+    let aiData = [];
+    let alerted = false;
+
+    /* ---------------- GAS GRAPH ---------------- */
+    const gasChart = new Chart(document.getElementById("gasChart"), {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: "Gas Level (ppm)",
+                data: gasData,
+                borderColor: "#16a34a",
+                borderWidth: 2,
+                tension: 0.4
+            }]
+        },
+        options: {
+            plugins: { legend: { labels: { color: "#e5e7eb" }}},
+            scales: {
+                x: { ticks: { color: "#94a3b8" }},
+                y: { ticks: { color: "#94a3b8" }, beginAtZero: true, max: 1000 }
+            }
+        }
+    });
+
+    /* ---------------- AI PREDICTION GRAPH ---------------- */
+    const aiChart = new Chart(document.getElementById("aiChart"), {
+        type: 'line',
+        data: {
+            labels: aiLabels,
+            datasets: [{
+                label: "Leak Probability %",
+                data: aiData,
+                borderColor: "#facc15",
+                borderWidth: 2,
+                tension: 0.4
+            }]
+        },
+        options: {
+            plugins: { legend: { labels: { color: "#e5e7eb" }}},
+            scales: {
+                x: { ticks: { color: "#94a3b8" }},
+                y: { ticks: { color: "#94a3b8" }, beginAtZero: true, max: 100 }
+            }
+        }
+    });
+
+    /* ---------------- FETCH DATA ---------------- */
+    function fetchData() {
+        fetch("/data")
+        .then(res => res.json())
+        .then(data => {
+
+            gasEl.innerText = data.gas_value;
+            const time = new Date().toLocaleTimeString();
+
+            /* ---- AI PREDICTION LOGIC (SIMPLE & CLEAR) ---- */
+            let risk = Math.min(100, Math.floor(data.gas_value / 10));
+            aiRiskEl.innerText = risk + "%";
+
+            if (risk >= 70) {
+                aiRiskEl.className = "card-value status-leak";
+            } else if (risk >= 40) {
+                aiRiskEl.className = "card-value status-warning";
+            } else {
+                aiRiskEl.className = "card-value status-safe";
+            }
+
+            /* ---- STATUS + UI + SIREN ---- */
+            if (risk >= 70 || data.status === "LEAK") {
+                statusEl.innerText = "LEAK";
+                statusEl.className = "card-value status-leak";
+                gasChart.data.datasets[0].borderColor = "#dc2626";
+                document.body.classList.add("flash");
+
+                if (!alerted) {
+                    siren.play();
+                    alerted = true;
+                }
+            }
+            else if (risk >= 40) {
+                statusEl.innerText = "WARNING";
+                statusEl.className = "card-value status-warning";
+                gasChart.data.datasets[0].borderColor = "#facc15";
+                document.body.classList.remove("flash");
+                siren.pause();
+                alerted = false;
+            }
+            else {
+                statusEl.innerText = "SAFE";
+                statusEl.className = "card-value status-safe";
+                gasChart.data.datasets[0].borderColor = "#16a34a";
+                document.body.classList.remove("flash");
+                siren.pause();
+                alerted = false;
+            }
+
+            /* ---- UPDATE GRAPHS ---- */
+            if (labels.length > 25) {
+                labels.shift();
+                gasData.shift();
+            }
+            labels.push(time);
+            gasData.push(data.gas_value);
+
+            if (aiLabels.length > 25) {
+                aiLabels.shift();
+                aiData.shift();
+            }
+            aiLabels.push(time);
+            aiData.push(risk);
+
+            gasChart.update();
+            aiChart.update();
+        });
+    }
+
+    setInterval(fetchData, 2000);
+</script>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+
+
+
+<!--
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Industrial Gas Monitoring – Control Room</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #0f172a;
+    color: #e5e7eb;
+}
+header {
+    background: #020617;
+    color: #38bdf8;
+    padding: 16px;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 600;
+}
+.controls { text-align: center; margin: 15px; }
+button {
+    padding: 10px 18px;
+    font-size: 14px;
+    border-radius: 6px;
+    border: none;
+    margin: 5px;
+    cursor: pointer;
+    color: #fff;
+}
+.start { background: #2563eb; }
+.stop { background: #475569; }
+.export { background: #16a34a; }
+
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 15px;
+    padding: 20px;
+    max-width: 1200px;
+    margin: auto;
+}
+.card {
+    background: #020617;
+    border-radius: 12px;
+    padding: 18px;
+    box-shadow: 0 0 12px rgba(56,189,248,0.15);
+}
+.card-title {
+    font-size: 13px;
+    color: #94a3b8;
+    text-transform: uppercase;
+}
+.card-value {
+    font-size: 26px;
+    font-weight: 600;
+}
+.safe { color: #22c55e; }
+.warn { color: #facc15; }
+.leak { color: #ef4444; }
+
+.chart-box {
+    background: #020617;
+    margin: 20px auto;
+    padding: 20px;
+    border-radius: 14px;
+    box-shadow: 0 0 14px rgba(56,189,248,0.15);
+    max-width: 1200px;
+}
+footer {
+    text-align: center;
+    font-size: 13px;
+    color: #64748b;
+    margin: 15px;
+}
+</style>
+</head>
+
+<body>
+
+<header>Industrial AI Gas Monitoring – Control Room</header>
+
+<div class="controls">
+    <button class="start" id="startBtn">▶ Start</button>
+    <button class="stop" id="stopBtn">⏹ Stop</button>
+    <button class="export" onclick="downloadCSV()">⬇ CSV</button>
+    <button class="export" onclick="downloadPDF()">⬇ PDF</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value"><span id="gas">--</span> ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">System Status</div>
+        <div class="card-value safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value"><span id="leakCount">0</span></div>
+    </div>
+</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarmSound">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<script>
+let labels = [];
+let gasData = [];
+let predictedData = [];
+let interval;
+let leakCount = 0;
+let alerted = false;
+
+const SAFE_LIMIT = 400;
+const WARNING_LIMIT = 300;
+
+const alarm = document.getElementById("alarmSound");
+
+// ---------------- CHART ----------------
+const chart = new Chart(document.getElementById("gasChart"), {
+    type: 'line',
+    data: {
+        labels: labels,
+        datasets: [
+            {
+                label: "Actual Gas Level",
+                data: gasData,
+                borderColor: "#22c55e",
+                borderWidth: 2,
+                tension: 0.3
+            },
+            {
+                label: "AI Predicted (Next 10 mins)",
+                data: predictedData,
+                borderColor: "#38bdf8",
+                borderDash: [6,6],
+                borderWidth: 2,
+                tension: 0.3
+            },
+            {
+                label: "Safe Limit",
+                data: Array(60).fill(SAFE_LIMIT),
+                borderColor: "#64748b",
+                borderDash: [4,4],
+                pointRadius: 0
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        plugins: {
+            legend: { labels: { color: "#e5e7eb" } }
+        },
+        scales: {
+            x: { ticks: { color: "#94a3b8" } },
+            y: { beginAtZero: true, max: 1000, ticks: { color: "#94a3b8" } }
+        }
+    }
+});
+
+// ---------------- AI PREDICTION ----------------
+function updatePrediction() {
+    predictedData.length = 0;
+    if (gasData.length < 5) return;
+
+    let slope = (gasData[gasData.length-1] - gasData[gasData.length-5]) / 5;
+    let base = gasData[gasData.length-1];
+
+    for (let i = 1; i <= 5; i++) {
+        predictedData.push(base + slope * i * 2);
+    }
+}
+
+// ---------------- FETCH DATA ----------------
+function fetchData() {
+    fetch("/data")
+    .then(res => res.json())
+    .then(data => {
+        document.getElementById("gas").innerText = data.gas_value;
+        const statusEl = document.getElementById("status");
+
+        if (data.gas_value >= SAFE_LIMIT) {
+            statusEl.innerText = "LEAK";
+            statusEl.className = "card-value leak";
+            chart.data.datasets[0].borderColor = "#ef4444";
+
+            if (!alerted) {
+                alarm.play();
+                leakCount++;
+                document.getElementById("leakCount").innerText = leakCount;
+                alerted = true;
+            }
+        }
+        else if (data.gas_value >= WARNING_LIMIT) {
+            statusEl.innerText = "WARNING";
+            statusEl.className = "card-value warn";
+            chart.data.datasets[0].borderColor = "#facc15";
+            alerted = false;
+        }
+        else {
+            statusEl.innerText = "SAFE";
+            statusEl.className = "card-value safe";
+            chart.data.datasets[0].borderColor = "#22c55e";
+            alerted = false;
+        }
+
+        const time = new Date().toLocaleTimeString();
+        if (labels.length > 60) {
+            labels.shift();
+            gasData.shift();
+        }
+
+        labels.push(time);
+        gasData.push(data.gas_value);
+
+        updatePrediction();
+        chart.update();
+    });
+}
+
+// ---------------- EXPORTS ----------------
+function downloadCSV() {
+    let csv = "Time,Gas Value (ppm)\n";
+    labels.forEach((t,i) => csv += `${t},${gasData[i]}\n`);
+
+    let blob = new Blob([csv], { type: "text/csv" });
+    let a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "gas_report.csv";
+    a.click();
+}
+
+function downloadPDF() {
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF();
+    pdf.text("Industrial Gas Monitoring Report", 20, 20);
+
+    let y = 35;
+    labels.forEach((t,i) => {
+        pdf.text(`${t} : ${gasData[i]} ppm`, 20, y);
+        y += 7;
+        if (y > 270) { pdf.addPage(); y = 20; }
+    });
+
+    pdf.save("gas_report.pdf");
+}
+
+// ---------------- BUTTONS ----------------
+document.getElementById("startBtn").onclick = () => {
+    fetchData();
+    interval = setInterval(fetchData, 2000);
+};
+document.getElementById("stopBtn").onclick = () => clearInterval(interval);
+</script>
+
+<footer>© 2026 Industrial AI Safety Control Room</footer>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Industrial Gas Monitoring – Control Room</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #0f172a;
+    color: #e5e7eb;
+}
+header {
+    background: #020617;
+    color: #38bdf8;
+    padding: 16px;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.controls { text-align: center; margin: 15px; }
+button {
+    padding: 10px 20px;
+    font-size: 15px;
+    border-radius: 6px;
+    border: none;
+    margin: 5px;
+    cursor: pointer;
+    color: #fff;
+}
+.start { background: #2563eb; }
+.stop  { background: #475569; }
+
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 15px;
+    padding: 20px;
+    max-width: 1200px;
+    margin: auto;
+}
+.card {
+    background: #020617;
+    border-radius: 12px;
+    padding: 18px;
+    box-shadow: 0 0 12px rgba(56,189,248,0.15);
+}
+.card-title {
+    font-size: 13px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+.card-value {
+    font-size: 26px;
+    font-weight: 600;
+}
+
+.safe { color: #22c55e; }
+.warn { color: #facc15; }
+.leak { color: #ef4444; }
+
+.chart-box {
+    background: #020617;
+    margin: 20px auto;
+    padding: 20px;
+    border-radius: 14px;
+    box-shadow: 0 0 14px rgba(56,189,248,0.15);
+    max-width: 1200px;
+}
+footer {
+    text-align: center;
+    font-size: 13px;
+    color: #64748b;
+    margin: 15px;
+}
+</style>
+</head>
+
+<body>
+
+<header>Industrial AI Gas Monitoring – Control Room</header>
+
+<div class="controls">
+    <button class="start" id="startBtn">▶ Start Monitoring</button>
+    <button class="stop" id="stopBtn">⏹ Stop</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Level</div>
+        <div class="card-value"><span id="gas">--</span> ppm</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">System Status</div>
+        <div class="card-value safe" id="status">SAFE</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value"><span id="leakCount">0</span></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">AI Leak Prediction (Next 10 mins)</div>
+        <div class="card-value" id="prediction">LOW (10%)</div>
+    </div>
+</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarmSound">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<script>
+let labels = [];
+let gasData = [];
+let interval;
+let leakCount = 0;
+let alerted = false;
+
+const SAFE_LIMIT = 400;
+const WARNING_LIMIT = 300;
+
+const alarm = document.getElementById("alarmSound");
+
+const chart = new Chart(document.getElementById("gasChart"), {
+    type: 'line',
+    data: {
+        labels: labels,
+        datasets: [
+            {
+                label: "Gas Level (ppm)",
+                data: gasData,
+                borderWidth: 2,
+                borderColor: "#22c55e",
+                tension: 0.35
+            },
+            {
+                label: "Safe Limit",
+                data: Array(40).fill(SAFE_LIMIT),
+                borderColor: "#64748b",
+                borderDash: [6,6],
+                pointRadius: 0
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        plugins: {
+            legend: { labels: { color: "#e5e7eb" } }
+        },
+        scales: {
+            x: { ticks: { color: "#94a3b8" } },
+            y: { beginAtZero: true, max: 1000, ticks: { color: "#94a3b8" } }
+        }
+    }
+});
+
+// ---------- AI PREDICTION ----------
+function predictLeak() {
+    if (gasData.length < 5) return "LOW (10%)";
+
+    let trend = gasData[gasData.length - 1] - gasData[gasData.length - 5];
+
+    if (trend > 120) return "HIGH (80%)";
+    if (trend > 60)  return "MEDIUM (45%)";
+    return "LOW (10%)";
+}
+
+// ---------- FETCH DATA ----------
+function fetchData() {
+    fetch("/data")
+    .then(res => res.json())
+    .then(data => {
+        document.getElementById("gas").innerText = data.gas_value;
+        const statusEl = document.getElementById("status");
+
+        if (data.gas_value >= SAFE_LIMIT) {
+            statusEl.innerText = "LEAK";
+            statusEl.className = "card-value leak";
+            chart.data.datasets[0].borderColor = "#ef4444";
+
+            if (!alerted) {
+                alarm.play();
+                alert("🚨 GAS LEAK DETECTED!");
+                leakCount++;
+                document.getElementById("leakCount").innerText = leakCount;
+                alerted = true;
+            }
+        } 
+        else if (data.gas_value >= WARNING_LIMIT) {
+            statusEl.innerText = "WARNING";
+            statusEl.className = "card-value warn";
+            chart.data.datasets[0].borderColor = "#facc15";
+            alerted = false;
+        } 
+        else {
+            statusEl.innerText = "SAFE";
+            statusEl.className = "card-value safe";
+            chart.data.datasets[0].borderColor = "#22c55e";
+            alerted = false;
+        }
+
+        const time = new Date().toLocaleTimeString();
+        if (labels.length > 40) {
+            labels.shift();
+            gasData.shift();
+        }
+
+        labels.push(time);
+        gasData.push(data.gas_value);
+
+        document.getElementById("prediction").innerText = predictLeak();
+        chart.update();
+    });
+}
+
+document.getElementById("startBtn").onclick = () => {
+    fetchData();
+    interval = setInterval(fetchData, 2000);
+};
+document.getElementById("stopBtn").onclick = () => clearInterval(interval);
+</script>
+
+<footer>© 2026 Industrial AI Safety Control Room</footer>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+
+
+<!--
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Industrial Gas Leak Monitoring</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #eef1f5;
+}
+header {
+    background: #1f2937;
+    color: #fff;
+    padding: 15px;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 600;
+}
+.controls { text-align: center; margin: 15px; }
+button {
+    padding: 10px 18px;
+    font-size: 15px;
+    border-radius: 6px;
+    border: none;
+    margin: 5px;
+    cursor: pointer;
+    color: #fff;
+}
+.start { background: #2563eb; }
+.stop { background: #6b7280; }
+
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 15px;
+    padding: 20px;
+    max-width: 1100px;
+    margin: auto;
+}
+.card {
+    background: #fff;
+    border-radius: 10px;
+    padding: 18px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+}
+.card-title {
+    font-size: 14px;
+    color: #6b7280;
+    text-transform: uppercase;
+}
+.card-value {
+    font-size: 26px;
+    font-weight: 600;
+}
+.status-safe { color: #16a34a; }
+.status-warn { color: #ca8a04; }
+.status-leak { color: #dc2626; }
+
+.chart-box {
+    background: #fff;
+    margin: 20px auto;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    max-width: 1100px;
+}
+footer {
+    text-align: center;
+    font-size: 13px;
+    color: #6b7280;
+    margin: 15px;
+}
+</style>
+</head>
+
+<body>
+
+<header>Industrial AI-Based Gas Leak Monitoring System</header>
+
+<div class="controls">
+    <button class="start" id="startBtn">▶ Start Monitoring</button>
+    <button class="stop" id="stopBtn">⏹ Stop</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Concentration</div>
+        <div class="card-value"><span id="gas">--</span> ppm</div>
+    </div>
+    <div class="card">
+        <div class="card-title">System Status</div>
+        <div class="card-value status-safe" id="status">SAFE</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value"><span id="leakCount">0</span></div>
+    </div>
+</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarmSound">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<script>
+let labels = [];
+let gasData = [];
+let interval;
+let leakCount = 0;
+let alerted = false;
+
+const SAFE_LIMIT = 400;
+const WARNING_LIMIT = 300;
+
+const alarm = document.getElementById("alarmSound");
+
+const chart = new Chart(document.getElementById("gasChart"), {
+    type: 'line',
+    data: {
+        labels: labels,
+        datasets: [
+            {
+                label: "Gas Level (ppm)",
+                data: gasData,
+                borderWidth: 2,
+                borderColor: "#16a34a",
+                tension: 0.3
+            },
+            {
+                label: "Safe Limit",
+                data: Array(30).fill(SAFE_LIMIT),
+                borderColor: "#6b7280",
+                borderDash: [6,6],
+                pointRadius: 0
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        scales: {
+            y: { beginAtZero: true, max: 1000 }
+        }
+    }
+});
+
+function fetchData() {
+    fetch("/data")
+    .then(res => res.json())
+    .then(data => {
+        document.getElementById("gas").innerText = data.gas_value;
+        const statusEl = document.getElementById("status");
+
+        if (data.gas_value >= SAFE_LIMIT) {
+            statusEl.innerText = "LEAK";
+            statusEl.className = "card-value status-leak";
+            chart.data.datasets[0].borderColor = "#dc2626";
+
+            if (!alerted) {
+                alarm.play();
+                alert("🚨 Gas Leak Detected!");
+                leakCount++;
+                document.getElementById("leakCount").innerText = leakCount;
+                alerted = true;
+            }
+
+        } else if (data.gas_value >= WARNING_LIMIT) {
+            statusEl.innerText = "WARNING";
+            statusEl.className = "card-value status-warn";
+            chart.data.datasets[0].borderColor = "#ca8a04";
+            alerted = false;
+
+        } else {
+            statusEl.innerText = "SAFE";
+            statusEl.className = "card-value status-safe";
+            chart.data.datasets[0].borderColor = "#16a34a";
+            alerted = false;
+        }
+
+        const time = new Date().toLocaleTimeString();
+        if (labels.length > 30) {
+            labels.shift();
+            gasData.shift();
+        }
+
+        labels.push(time);
+        gasData.push(data.gas_value);
+
+        chart.update();
+    });
+}
+
+document.getElementById("startBtn").onclick = () => {
+    fetchData();
+    interval = setInterval(fetchData, 2000);
+};
+document.getElementById("stopBtn").onclick = () => clearInterval(interval);
+</script>
+
+<footer>© 2026 Industrial Safety Monitoring | AI + IoT</footer>
+
+</body>
+</html>
+-->
+
+
+
+
+
+
+<!-- little variant 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Industrial Gas Leak Monitoring</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+    body {
+        margin: 0;
+        font-family: "Segoe UI", Roboto, Arial, sans-serif;
+        background: #eef1f5;
+        color: #333;
+    }
+
+    header {
+        background: #1f2937;
+        color: #fff;
+        padding: 15px;
+        text-align: center;
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+    }
+
+    .controls {
+        text-align: center;
+        margin: 15px;
+    }
+
+    button {
+        padding: 10px 18px;
+        font-size: 15px;
+        border-radius: 6px;
+        border: none;
+        margin: 5px;
+        cursor: pointer;
+        color: #fff;
+    }
+
+    .start { background: #2563eb; }
+    .stop  { background: #6b7280; }
+
+    .dashboard {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 15px;
+        padding: 20px;
+        max-width: 1100px;
+        margin: auto;
+    }
+
+    .card {
+        background: #ffffff;
+        border-radius: 10px;
+        padding: 18px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+    }
+
+    .card-title {
+        font-size: 14px;
+        color: #6b7280;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+    }
+
+    .card-value {
+        font-size: 26px;
+        font-weight: 600;
+    }
+
+    .status-safe {
+        color: #16a34a;
+        font-weight: 700;
+    }
+
+    .status-leak {
+        color: #dc2626;
+        font-weight: 700;
+    }
+
+    .chart-box {
+        background: #ffffff;
+        margin: 20px auto;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        max-width: 1100px;
+    }
+
+    footer {
+        text-align: center;
+        font-size: 13px;
+        color: #6b7280;
+        margin: 15px;
+    }
+</style>
+</head>
+
+<body>
+
+<header>
+    Industrial AI-Based Gas Leak Monitoring System
+</header>
+
+<div class="controls">
+    <button class="start" id="startBtn">▶ Start Monitoring</button>
+    <button class="stop" id="stopBtn">⏹ Stop</button>
+</div>
+
+<div class="dashboard">
+    <div class="card">
+        <div class="card-title">Gas Concentration</div>
+        <div class="card-value"><span id="gas">--</span> ppm</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">System Status</div>
+        <div class="card-value" id="status" class="status-safe">SAFE</div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Leak Count</div>
+        <div class="card-value"><span id="leakCount">0</span></div>
+    </div>
+</div>
+
+<div class="chart-box">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarmSound">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<script>
+let labels = [];
+let gasData = [];
+let interval;
+let leakCount = 0;
+let alerted = false;
+
+const alarm = document.getElementById("alarmSound");
+
+const chart = new Chart(document.getElementById("gasChart"), {
+    type: 'line',
+    data: {
+        labels: labels,
+        datasets: [{
+            label: "Gas Level (ppm)",
+            data: gasData,
+            borderWidth: 2,
+            borderColor: "#dc2626",
+            tension: 0.3
+        }]
+    },
+    options: {
+        responsive: true,
+        scales: {
+            y: { beginAtZero: true, max: 1000 }
+        }
+    }
+});
+
+function fetchData() {
+    fetch("/data")
+    .then(res => res.json())
+    .then(data => {
+        document.getElementById("gas").innerText = data.gas_value;
+
+        const statusEl = document.getElementById("status");
+        statusEl.innerText = data.status;
+
+        if (data.status === "LEAK") {
+            statusEl.className = "card-value status-leak";
+            if (!alerted) {
+                alarm.play();
+                alert("⚠ Gas Leak Detected!");
+                leakCount++;
+                document.getElementById("leakCount").innerText = leakCount;
+                alerted = true;
+            }
+        } else {
+            statusEl.className = "card-value status-safe";
+            alerted = false;
+        }
+
+        const time = new Date().toLocaleTimeString();
+        if (labels.length > 30) {
+            labels.shift();
+            gasData.shift();
+        }
+        labels.push(time);
+        gasData.push(data.gas_value);
+        chart.update();
+    });
+}
+
+document.getElementById("startBtn").onclick = () => {
+    fetchData();
+    interval = setInterval(fetchData, 2000);
+};
+
+document.getElementById("stopBtn").onclick = () => {
+    clearInterval(interval);
+};
+</script>
+
+<footer>
+    © 2026 Industrial Safety Monitoring | AI + IoT
+</footer>
+
+</body>
+</html>
+-->
+
+
+
+<!--first initial proper code-->
+
+<!--
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gas Leak Detection Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        body {
+            font-family: Arial;
+            background: #f4f6f9;
+            text-align: center;
+            padding: 10px;
+        }
+        h1 { color: #c9302c; }
+
+        .card {
+            display: inline-block;
+            width: 220px;
+            padding: 15px;
+            margin: 10px;
+            border-radius: 12px;
+            color: white;
+            font-size: 18px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        .safe { background: #28a745; }
+        .leak { background: #dc3545; }
+        .info { background: #007bff; }
+
+        #chartBox {
+            width: 95%;
+            margin: auto;
+            background: white;
+            padding: 15px;
+            border-radius: 12px;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            border-radius: 8px;
+            border: none;
+            background: #343a40;
+            color: white;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>AI-Powered Gas Leak Monitoring</h1>
+
+<button id="startBtn">▶ Start Monitoring</button>
+<button id="stopBtn">⏹ Stop</button>
+
+<br>
+
+<div class="card info">
+    Gas Value<br>
+    <b><span id="gas">--</span></b>
+</div>
+
+<div class="card safe" id="statusCard">
+    Status<br>
+    <b><span id="status">SAFE</span></b>
+</div>
+
+<div class="card info">
+    Leak Count<br>
+    <b><span id="leakCount">0</span></b>
+</div>
+
+<div id="chartBox">
+    <canvas id="gasChart"></canvas>
+</div>
+
+<audio id="alarmSound">
+    <source src="https://www.soundjay.com/button/beep-07.wav">
+</audio>
+
+<script>
+    let labels = [];
+    let gasData = [];
+    let interval;
+    let leakCount = 0;
+    let lastAlert = false;
+
+    const alarm = document.getElementById("alarmSound");
+
+    const ctx = document.getElementById("gasChart").getContext("2d");
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: "Gas Level",
+                data: gasData,
+                borderColor: "red",
+                borderWidth: 2,
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: { y: { beginAtZero: true, max: 1000 } }
+        }
+    });
+
+    function fetchData() {
+        fetch("/data")
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById("gas").innerText = data.gas_value;
+            document.getElementById("status").innerText = data.status;
+
+            const card = document.getElementById("statusCard");
+
+            if(data.status === "LEAK"){
+                card.className = "card leak";
+                if(!lastAlert){
+                    alarm.play();
+                    alert("🚨 Gas Leak Detected!");
+                    leakCount++;
+                    document.getElementById("leakCount").innerText = leakCount;
+                    lastAlert = true;
+                }
+            } else {
+                card.className = "card safe";
+                lastAlert = false;
+            }
+
+            const time = new Date().toLocaleTimeString();
+            if(labels.length > 25){
+                labels.shift();
+                gasData.shift();
+            }
+            labels.push(time);
+            gasData.push(data.gas_value);
+            chart.update();
+        });
+    }
+
+    document.getElementById("startBtn").onclick = () => {
+        alarm.play().then(() => alarm.pause());
+        fetchData();
+        interval = setInterval(fetchData, 2000);
+    };
+
+    document.getElementById("stopBtn").onclick = () => {
+        clearInterval(interval);
+    };
+</script>
+
+</body>
+</html>
+-->
